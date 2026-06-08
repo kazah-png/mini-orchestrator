@@ -1,12 +1,15 @@
 <div align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:0d1117,50:001a2e,100:002b4d&height=130&section=header&text=mini-orchestrator&fontSize=38&fontColor=e6edf3&animation=fadeIn&fontAlignY=55" />
+</div>
 
-# Mini Orchestrator — Container Orchestrator from Scratch
+<div align="center">
 
-**Linux namespaces · cgroups · Bridge networking · REST API**  
-Go implementation of a lightweight container orchestrator (mini-K8s)
+[![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev)
+[![Platform](https://img.shields.io/badge/Platform-Linux-FCC624?style=flat&logo=linux&logoColor=black)]()
+[![License](https://img.shields.io/badge/License-MIT-3fb950?style=flat)](LICENSE)
 
-[![Go](https://img.shields.io/badge/Go-1.22-blue?style=flat-square&logo=go)](https://go.dev)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+**Lightweight container orchestrator written from scratch in Go.**  
+Linux namespaces · cgroups · Bridge networking · IPAM · REST API
 
 </div>
 
@@ -14,77 +17,150 @@ Go implementation of a lightweight container orchestrator (mini-K8s)
 
 ## Overview
 
-Mini Orchestrator is a container orchestration system built from scratch in Go. It launches isolated containers using Linux namespaces (PID, NET, UTS, IPC, MOUNT), limits resources with cgroups, assigns IPs via a bridge network with NAT, and exposes a REST API for container lifecycle management. Designed as a senior-level portfolio project to demonstrate deep systems knowledge.
+`mini-orchestrator` launches isolated containers using Linux kernel primitives directly — no Docker daemon, no containerd, no runc. It creates new PID, NET, UTS, IPC, and MOUNT namespaces via `unshare`, pivots the root filesystem with `pivot_root`, limits CPU and memory with cgroups v1, assigns IP addresses from a managed pool, and wires each container to a bridge network with NAT for outbound connectivity.
+
+A REST API manages the full container lifecycle: create, list, inspect, and delete.
+
+---
+
+## Architecture
+
+```
+REST API (gorilla/mux) :8080
+          │
+          ▼
+  Container Manager
+  ├── Process launcher   (unshare + pivot_root + exec)
+  ├── Cgroup manager     (cpu.cfs_quota_us + memory.limit_in_bytes)
+  ├── Network manager    (bridge + veth pair + IPAM + iptables MASQUERADE)
+  └── Scheduler          (binpacking on declared CPU/memory)
+          │
+          ▼
+  /var/lib/mini-containers/<id>/rootfs   (container filesystem)
+```
 
 ---
 
 ## Features
 
-- **Container isolation** – unshare + pivot_root, separate network/pid/uts namespaces.
-- **Resource limits** – CPU shares (cfs quota) and memory limits via cgroups.
-- **Bridge networking** – veth pairs, IPAM, iptables MASQUERADE for outbound internet.
-- **Scheduler** – binpacking (single node demo; extensible to multi‑node).
-- **REST API** – create, list, get, delete containers.
-- **Persistence** – container state in memory; rootfs on disk.
+| Feature | Details |
+|---|---|
+| **Namespace isolation** | PID, NET, UTS, IPC, MOUNT — each container gets its own namespace set |
+| **Root pivot** | `pivot_root` into container rootfs; old root unmounted |
+| **cgroups** | CPU shares via `cpu.cfs_quota_us`; memory cap via `memory.limit_in_bytes` |
+| **Bridge network** | `mini-br0` bridge; veth pair per container; IPAM from `10.100.0.0/24` |
+| **NAT** | `iptables -t nat -A POSTROUTING -j MASQUERADE` for outbound internet from containers |
+| **REST API** | Create, list, get, delete container operations |
+| **Scheduler** | Binpacking — assigns containers to nodes with the most remaining capacity |
+
+---
+
+## Prerequisites
+
+- Linux host (Ubuntu 22.04 / Debian 12 recommended)
+- Root access
+- Standard tools: `ip`, `iptables`, `unshare`, `nsenter`, `pivot_root`
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-- Linux host (Ubuntu/Debian) with root access.
-- `iptables`, `ip`, `unshare`, `nsenter`, `pivot_root` (standard).
+### 1. Set up the bridge (once)
 
-### Setup bridge (as root)
 ```bash
 sudo ./scripts/setup-bridge.sh
-Run orchestrator
-bash
-make run   # requires sudo
-API usage
-bash
-# Create container
+```
+
+This creates `mini-br0` at `10.100.0.1/24` and enables IP forwarding.
+
+### 2. Run the orchestrator
+
+```bash
+make run   # runs as root
+```
+
+---
+
+## API
+
+### Create a container
+
+```bash
 curl -X POST http://localhost:8080/containers \
   -H "Content-Type: application/json" \
-  -d '{"image":"busybox","cmd":["/bin/sh","-c","sleep 300"],"cpu":500,"memory":134217728}'
+  -d '{
+    "image":  "busybox",
+    "cmd":    ["/bin/sh", "-c", "sleep 300"],
+    "cpu":    500,
+    "memory": 134217728
+  }'
+```
 
-# List containers
+| Field | Description |
+|---|---|
+| `image` | Rootfs directory name under `/var/lib/mini-containers/images/` |
+| `cmd` | Command to run inside the container |
+| `cpu` | CPU quota in millicores (500 = 0.5 CPU) |
+| `memory` | Memory limit in bytes |
+
+### List containers
+
+```bash
 curl http://localhost:8080/containers
+```
 
-# Get container
+### Inspect a container
+
+```bash
 curl http://localhost:8080/containers/<id>
+```
 
-# Delete
+### Delete a container
+
+```bash
 curl -X DELETE http://localhost:8080/containers/<id>
-Architecture
-text
-REST API (gorilla/mux)
-        │
-        ▼
-Container Manager
-   ├── Process launcher (unshare + pivot_root)
-   ├── Cgroup manager (CPU/memory)
-   ├── Network manager (bridge + veth + IPAM)
-   └── Scheduler (binpacking)
-Notes
-Requires root due to cgroups and network manipulation.
+```
 
-Rootfs is minimal; you can replace with real container images (e.g., extract Docker tar).
+---
 
-No image registry; you must pre-populate /var/lib/mini-containers/<id>/rootfs.
+## Preparing a rootfs
 
-License
-MIT.
+The orchestrator does not pull images from a registry. Provide a minimal root filesystem manually:
 
-</div> ```
-14. Dockerfile (para construir el binario, no para ejecutar el orchestrator)
-dockerfile
-FROM golang:1.22 AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o orchestrator ./cmd/orchestrator
+```bash
+# Extract a Docker image as rootfs
+docker export $(docker create busybox) | tar -C /var/lib/mini-containers/images/busybox -xf -
+```
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y iptables iproute2 util-linux && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/orchestrator /usr/local/bin/
-CMD ["orchestrator"]
+Or use `debootstrap` for a Debian base:
+
+```bash
+sudo debootstrap --arch=amd64 bookworm /var/lib/mini-containers/images/debian
+```
+
+---
+
+## Networking detail
+
+On container creation:
+1. A `veth` pair is created: one end stays on the host, one moves into the container's network namespace.
+2. The host end is attached to `mini-br0`.
+3. An IP from `10.100.0.0/24` is assigned to the container end.
+4. The container's default route is set to `10.100.0.1` (the bridge).
+5. `iptables MASQUERADE` on the host provides outbound NAT.
+
+---
+
+## Limitations
+
+- **Root required** — cgroups and network manipulation require elevated privileges.
+- **cgroups v1 only** — systemd-based distros that use cgroups v2 need minor adapter changes.
+- **No image registry** — rootfs must be pre-populated manually.
+- **Single host** — no multi-node scheduling; the binpacker is a local demo.
+- **In-memory state** — container metadata does not survive an orchestrator restart.
+
+---
+
+<div align="center">
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=0:002b4d,50:001a2e,100:0d1117&height=80&section=footer" />
+</div>
